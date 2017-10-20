@@ -22,4 +22,4 @@ Extract <- file2[file2[,7]%in%Vector,]
 nrow(Extract)
 
 #Write the data into an excel file
-write.table(Extract, file="d-3_allcommon_extracted.xls", sep="\t", col.names+TRUE, row.names=FALSE, quote=FALSE)
+write.table(Extract, file="d-3_allcommon_extracted.xls", sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
