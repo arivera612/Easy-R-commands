@@ -1,0 +1,22 @@
+library(edgeR)
+
+#read counts file
+countDF <- read.delim("countfile", sep="\t", header=TRUE)
+
+#fix rownames (ENSEMBl IDs are designated "X")
+#also select control and experimental columns
+countDF2 <- subset(countDF, select=c(X))
+rownames(countDF2) = countDF$X
+attach(countDF2)
+comp <- cbind(control,test)
+rownames(comp) <- countDF$X
+
+
+Counts <- as.matrix(countDF2)
+
+bcv <- 0.4
+y <- DGEList(counts=comp, group=1:2)
+et <- exactTest(y, dispersion=bcv^2)
+desc <- read.delim("bigdata/messaoudilab/arivera/Reference_Macaque/Rhesus_annotations.xls", row.names=1)
+edgeDF <- cbind(et$table, desc[rownames(et$table),])
+write.table(edgeDF, "edgeRglm_allcomp.xls", quote=FALSE, sep="\t", col.names=NA)
