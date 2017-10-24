@@ -1,0 +1,146 @@
+# Load the following packages
+library(systemPipeR)
+library(GenomicFeatures)
+
+
+#Read the targets file
+targets <- read.delim("targets.txt", comment.char = "#")
+#Check if targets file is correct
+targets
+#Create args
+args <- systemArgs(sysma="tophat.param", mytargets="targets.txt")
+sysargs(args[1])
+moduleload(modules(args))
+
+#Assign resources and run tophat on the cluster
+resources <- list(walltime="20:00:00", ntasks=1, ncpus=cores(args), memory="15G")
+reg <- clusterRun(args, conffile=".BatchJobs.R", template="slurm.tmpl", Njobs=20, runid="01", resourceList=resources)
+
+#Check if alignment files exist
+file.exists(outpaths(args))
+
+#Get alignment stats
+read_statsDF <- alignStats(args=args)
+write.table(read_statsDF, file="results/alignStats.xls", row.names=FALSE, quote=FALSE, sep="\t")
+
+#These commands have to be run only once per reference. You should already have a mmul sqlite file in data
+library(GenomicFeatures)
+txdb <- makeTxDbFromGFF(file="data/Macaca_mulatta.MMUL_1.78.gtf", format="gtf", dataSource="ENSEMBL", organism="Macaca mulatta")
+saveDb(txdb, file="./data/Macaca_mulatta.sqlite")
+
+#Counting reads using cluster
+library(BiocParallel)
+f <- function(x) {
+  library(systemPipeR); library(BiocParallel); library(GenomicFeatures)
+  txdb <- loadDb("./data/Macaca_mulatta_ORF_IGR_genome.sqlite")
+  eByg <- exonsBy(txdb, by="gene")
+  args <- systemArgs(sysma="tophat.param", mytargets="targets_alld0s.txt")
+  bfl <- BamFileList(outpaths(args), yieldSize=50000, index=character())
+  summarizeOverlaps(eByg, bfl[x], mode="Union", ignore.strand=FALSE, inter.feature=FALSE, singleEnd=TRUE)
+}
+txdb <- loadDb("./data/Macaca_mulatta_ORF_IGR_genome.sqlite")
+eByg <- exonsBy(txdb, by="gene")
+
+library(BatchJobs)
+funs <- makeClusterFunctionsTorque("torque.tmpl")
+param <- BatchJobsParam(length(args), resources=list(walltime="20:00:00", nodes="1:ppn=1", memory="6gb"), cluster.functions=funs)
+register(param)
+counteByg <- bplapply(seq(along=args), f)
+
+##alternative counting
+library("GenomicFeatures"); library(BiocParallel)
+txdb <- loadDb("./data/Macaca_mulatta.sqlite")
+eByg <- exonsBy(txdb, by=c("gene"))
+bfl <- BamFileList(outpaths(args), yieldSize=50000, index=character())
+multicoreParam <- MulticoreParam(workers=8); register(multicoreParam); registered()
+counteByg <- bplapply(bfl, function(x) summarizeOverlaps(eByg, x, mode="Union",
+                                               ignore.strand=FALSE,
+                                               inter.feature=FALSE,
+                                               singleEnd=TRUE))
+countDFeByg <- sapply(seq(along=counteByg), function(x) assays(counteByg[[x]])$counts)
+
+#Wait until the above object is created
+countDFeByg <- sapply(seq(along=counteByg), function(x) assays(counteByg[[x]])$counts)
+rownames(countDFeByg) <- names(rowRanges(counteByg[[1]])); colnames(countDFeByg) <- names(outpaths(args))
+
+#write the above object into a file in results directory
+write.table(countDFeByg, "results/countDFeByg.xls", col.names=NA, quote=FALSE, sep="\t")
+
+#RPKM normalization and save as excel file
+rpkmDFeByg <- apply(countDFeByg, 2, function(x) returnRPKM(counts=x, ranges=eByg))
+write.table(rpkmDFeByg, "results/rpkmDFeByg.xls", col.names=NA, quote=FALSE, sep="\t")
+
+##\subsection{Sample-wise correlation analysis}
+##The following computes the sample-wise Spearman correlation coefficients from the RPKM normalized expression values. After transformation to a distance matrix, hierarchical clustering is performed with the \Rfunction{hclust} fu$
+library(ape)
+rpkmDFeByg <- read.delim("./results/rpkmDFeByg.xls", row.names=1, check.names=FALSE)[,-19]
+rpkmDFeByg <- rpkmDFeByg[rowMeans(rpkmDFeByg) > 50,]
+d <- cor(rpkmDFeByg, method="spearman")
+hc <- hclust(as.dist(1-d))
+pdf("results/sample_tree.pdf")
+plot.phylo(as.phylo(hc), type="p", edge.col="blue", edge.width=2, show.node.label=TRUE, no.margin=TRUE)
+dev.off()
+
+##Sample-Wise Clustering with \Robject{rlog} Values
+library(DESeq2)
+countDF <- as.matrix(read.table("./results/countDFeByg.xls"))
+colData <- data.frame(row.names=targets$SampleName, condition=targets$Factor)
+dds <- DESeqDataSetFromMatrix(countData = countDF, colData = colData, design = ~ condition)
+d <- cor(assay(rlog(dds)), method="spearman")
+hc <- hclust(dist(1-d))
+pdf("results/sample_tree_rlog.pdf")
+plot.phylo(as.phylo(hc), type="p", edge.col=4, edge.width=3, show.node.label=TRUE, no.margin=TRUE)
+dev.off()
+
+
+#Group-wise PCA
+rld <- rlog(dds)
+pdf("results/PCA_group.pdf")
+plotPCA(rld)
+dev.off()
+
+#Sample-wise PCA
+colData <- data.frame(row.names=targets$SampleName, condition=targets$SampleName)
+dds <- DESeqDataSetFromMatrix(countData = countDF, colData = colData, design = ~ condition)
+rld <- rlog(dds)
+pdf("results/PCA_sample.pdf")
+plotPCA(rld)
+dev.off()
+
+#Group-wise PCA based on vsd
+colData <- data.frame(row.names=targets$SampleName, condition=targets$Factor)
+dds <- DESeqDataSetFromMatrix(countData = countDF, colData = colData, design = ~ condition)
+vsd <- varianceStabilizingTransformation(dds)
+pdf("results/PCA_group_vsd.pdf")
+plotPCA(vsd)
+dev.off()
+
+#Sample-wise PCA based on vsd
+colData <- data.frame(row.names=targets$SampleName, condition=targets$SampleName)
+dds <- DESeqDataSetFromMatrix(countData = countDF, colData = colData, design = ~ condition)
+vsd <- varianceStabilizingTransformation(dds)
+pdf("results/PCA_sample_vsd.pdf")
+plotPCA(vsd)
+dev.off()
+
+
+#Running edgeR
+library(edgeR)
+countDF <- read.delim("results/countDFeByg.xls", row.names=1, check.names=FALSE)
+targets <- read.delim("targets.txt", comment="#")
+cmp <- readComp(file="targets.txt", format="matrix", delim="-")
+edgeDF <- run_edgeR(countDF=countDF, targets=targets, cmp=cmp[[1]], independent=TRUE, mdsplot="")
+desc <- read.delim("/bigdata/messaoudilab/arivera/Reference_Macaque/Rhesus_annotations.xls", row.names=1)
+edgeDF <- cbind(edgeDF, desc[rownames(edgeDF),])
+write.table(edgeDF, "./results/edgeRglm_allcomp.xls", quote=FALSE, sep="\t", col.names = NA)
+
+edgeDF <- read.delim("results/edgeRglm_allcomp.xls", row.names=1, check.names=FALSE)
+pdf("results/DEGcounts.pdf")
+DEG_list <- filterDEGs(degDF=edgeDF, filter=c(Fold=2, FDR=5))
+dev.off()
+write.table(DEG_list$Summary, "./results/DEGcounts.xls", quote=FALSE, sep="\t", row.names=FALSE)
+
+edgeR <- read.delim("results/edgeRglm_allcomp.xls", sep="\t", header=TRUE)
+rpkm <- read.delim("results/rpkm.xls", sep="\t", header=TRUE)
+edgeR_rpkm <- merge(edgeR, rpkm, by.x="RhesusEnsembl", by.y="RhesusEnsembl", all=TRUE)
+write.table(edgeR_rpkm, file="results/edgeR_rpkm.xls", sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
