@@ -3,9 +3,11 @@ library(edgeR)
 #read counts file
 countDF <- read.delim("countfile", sep="\t", header=TRUE)
 
-#fix rownames (ENSEMBl IDs are designated "X")
+
 #also select control and experimental columns
 countDF2 <- subset(countDF, select=c(X))
+
+#fix rownames (ENSEMBl IDs are designated "X")
 rownames(countDF2) = countDF$X
 
 counts <- as.matrix(countDF2)
